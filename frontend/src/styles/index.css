@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-50 text-slate-800;
+}
+
+/* // WANDR CHANGE [8] — theme toggle support applied on body data attribute. */
+body[data-theme='dark'] {
+  @apply bg-slate-950 text-slate-100;
+}
+
+body[data-theme='dark'] .wandr-card {
+  @apply border-slate-700 bg-slate-900 text-slate-100;
+}
+
+body[data-theme='dark'] .wandr-pill,
+body[data-theme='dark'] .wandr-icon {
+  @apply border-slate-700 bg-slate-800 text-slate-200;
+}
+
+.wandr-card {
+  @apply rounded-2xl bg-white shadow-sm border border-slate-200;
+}
+
+.wandr-btn {
+  @apply inline-flex items-center justify-center rounded-xl px-4 py-2 font-medium transition;
+}
+
+.wandr-pill {
+  @apply rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 border border-emerald-100 hover:bg-emerald-100 transition;
+}
+
+.wandr-icon {
+  @apply rounded-xl bg-violet-50 px-3 py-2 text-sm border border-violet-100 hover:bg-violet-100 transition;
+}
+
+.wandr-glass {
+  @apply rounded-3xl border border-white/60 bg-white/70 shadow-sm backdrop-blur;
+}
+
+.wandr-drum {
+  scroll-snap-type: y mandatory;
+  overscroll-behavior-y: contain;
+  scrollbar-width: none;
+}
+
+.wandr-drum::-webkit-scrollbar {
+  display: none;
+}
+
+.wandr-drum-item {
+  scroll-snap-align: center;
+}
+
+.wandr-marker-pop {
+  animation: wandrMarkerPop 300ms ease-out;
+}
+
+.wandr-route-segment {
+  stroke-dasharray: 10;
+  animation: wandrRouteDraw 900ms linear;
+}
+
+/* // WANDR CHANGE [6] — Plan for Me recommended action visual treatment. */
+.wandr-smart-btn {
+  @apply bg-indigo-600 shadow-lg shadow-indigo-300;
+  position: relative;
+  overflow: hidden;
+}
+
+.wandr-smart-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 0%, rgba(255, 255, 255, 0.35) 45%, transparent 70%);
+  transform: translateX(-120%);
+  animation: wandrShimmer 2.2s ease-in-out infinite;
+}
+
+@keyframes wandrMarkerPop {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes wandrRouteDraw {
+  from {
+    stroke-dashoffset: 36;
+    opacity: 0.3;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes wandrShimmer {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}
