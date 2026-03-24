@@ -1,6 +1,26 @@
 const Trip = require('../models/Trip');
 const { geocodeLocation, fetchNearbyPlaces, generateItinerary } = require('../services/mapService');
 
+// In-memory cache for discover results (10-minute TTL).
+const discoverCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000;
+
+const buildDiscoverCacheKey = (locationName, interests) => {
+  const loc = String(locationName || '').trim().toLowerCase();
+  const ints = [...(interests || [])].map((i) => String(i).trim().toLowerCase()).sort().join('|');
+  return `${loc}::${ints}`;
+};
+
+const getCachedDiscover = (key) => {
+  const entry = discoverCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    discoverCache.delete(key);
+    return null;
+  }
+  return entry.data;
+};
+
 const generateTrip = async (req, res) => {
   try {
     const { locationName, lat, lon, interests, days } = req.body;
@@ -53,6 +73,13 @@ const discoverSpots = async (req, res) => {
       return res.status(400).json({ message: 'locationName and interests are required.' });
     }
 
+    // Check cache first to avoid repeated external API calls.
+    const cacheKey = buildDiscoverCacheKey(locationName, interests);
+    const cached = getCachedDiscover(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const center = lat && lon ? { lat: Number(lat), lon: Number(lon) } : await geocodeLocation(locationName);
     const places = await fetchNearbyPlaces({
       locationName,
@@ -62,14 +89,19 @@ const discoverSpots = async (req, res) => {
       foodBrandsOnly: Boolean(foodBrandsOnly),
     });
 
-    return res.json({
+    const result = {
       app: 'Wandr',
       locationName,
       center,
       interests,
       places,
       totalPlaces: places.length,
-    });
+    };
+
+    // Store in cache for subsequent requests.
+    discoverCache.set(cacheKey, { data: result, timestamp: Date.now() });
+
+    return res.json(result);
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Unable to discover spots.' });
   }

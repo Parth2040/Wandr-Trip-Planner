@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import L from 'leaflet';
 import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -42,11 +42,10 @@ export default function MapcartaView({
   center,
   selectedPlace,
   cityName = '',
+  activeDay = 1,
+  revealedPinCount = 0,
   heightClass = 'h-[60vh]',
 }) {
-  const [revealedCounts, setRevealedCounts] = useState({});
-  const [revealedSegments, setRevealedSegments] = useState([]);
-
   const groupedByDay = useMemo(
     () =>
       itinerary.map((day, index) => ({
@@ -59,53 +58,20 @@ export default function MapcartaView({
     [itinerary]
   );
 
-  const allPoints = useMemo(
-    () => groupedByDay.flatMap((day) => day.places.map((place) => ({ lat: place.lat, lon: place.lon }))),
-    [groupedByDay]
+  const activeDayData = useMemo(
+    () => groupedByDay.find((day) => day.day === activeDay) || groupedByDay[0] || { day: 1, color: DAY_COLORS[0], places: [] },
+    [activeDay, groupedByDay]
   );
 
-  useEffect(() => {
-    setRevealedCounts({});
-    setRevealedSegments([]);
+  const allPoints = useMemo(
+    () => activeDayData.places.map((place) => ({ lat: place.lat, lon: place.lon })),
+    [activeDayData.places]
+  );
 
-    const timers = [];
-    let elapsed = 0;
-
-    groupedByDay.forEach((day, dayIndex) => {
-      day.places.forEach((place, placeIndex) => {
-        elapsed += 600;
-        timers.push(
-          setTimeout(() => {
-            setRevealedCounts((previous) => ({
-              ...previous,
-              [day.day]: Math.max(previous[day.day] || 0, placeIndex + 1),
-            }));
-
-            if (placeIndex > 0) {
-              const previousStop = day.places[placeIndex - 1];
-              setRevealedSegments((current) => [
-                ...current,
-                {
-                  id: `segment-${day.day}-${placeIndex}`,
-                  color: day.color,
-                  positions: [
-                    [previousStop.lat, previousStop.lon],
-                    [place.lat, place.lon],
-                  ],
-                },
-              ]);
-            }
-          }, elapsed)
-        );
-      });
-
-      elapsed += dayIndex < groupedByDay.length - 1 ? 500 : 0;
-    });
-
-    return () => {
-      timers.forEach((timerId) => clearTimeout(timerId));
-    };
-  }, [groupedByDay]);
+  const visiblePlaces = useMemo(
+    () => activeDayData.places.slice(0, Math.max(0, revealedPinCount)),
+    [activeDayData.places, revealedPinCount]
+  );
 
   if (!allPoints.length) {
     return (
@@ -130,81 +96,65 @@ export default function MapcartaView({
         <FitToPlaces points={allPoints} />
         <FocusSelectedPlace selectedPlace={selectedPlace} />
 
-        {groupedByDay.map((day) => {
-          const visibleCount = revealedCounts[day.day] || 0;
-          const visiblePlaces = day.places.slice(0, visibleCount);
+        {visiblePlaces.map((place, index) => {
+          const isSelected = selectedPlace?.id === place.id;
+          const markerIcon = L.divIcon({
+            className: 'wandr-marker-pop',
+            html: `<div style="
+              width: 30px;
+              height: 30px;
+              border-radius: 9999px;
+              border: 2px solid #fff;
+              background: ${activeDayData.color};
+              color: #fff;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              font-weight: 700;
+              font-size: 13px;
+              transform: ${isSelected ? 'scale(1.08)' : 'scale(1)'};
+            ">${index + 1}</div>`,
+            iconSize: [30, 30],
+            iconAnchor: [15, 15],
+          });
 
           return (
-            <Fragment key={`day-${day.day}`}>
-              {visiblePlaces.map((place, index) => {
-                const isSelected = selectedPlace?.id === place.id;
-                const markerIcon = L.divIcon({
-                  className: 'wandr-marker-pop',
-                  html: `<div style="
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 9999px;
-                    border: 2px solid #fff;
-                    background: ${day.color};
-                    color: #fff;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-weight: 700;
-                    font-size: 13px;
-                    transform: ${isSelected ? 'scale(1.08)' : 'scale(1)'};
-                  ">${index + 1}</div>`,
-                  iconSize: [30, 30],
-                  iconAnchor: [15, 15],
-                });
-
-                return (
-                  <Marker
-                    key={`${day.day}-${place.id}`}
-                    position={[place.lat, place.lon]}
-                    icon={markerIcon}
-                  >
-                    <Popup>
-                      <button
-                        type="button"
-                        onClick={() => openGoogleSearch(place.name, cityName)}
-                        className="cursor-pointer text-left"
-                      >
-                        <p className="font-medium text-slate-900">{place.name}</p>
-                        <p className="text-xs text-slate-500">Day {day.day} • Stop {index + 1}</p>
-                        <p className="mt-1 inline-flex items-center gap-1 text-xs text-indigo-600">🔍 View on Google</p>
-                      </button>
-                    </Popup>
-                  </Marker>
-                );
-              })}
-            </Fragment>
+            <Marker
+              key={`${activeDayData.day}-${place.id}`}
+              position={[place.lat, place.lon]}
+              icon={markerIcon}
+            >
+              <Popup>
+                <button
+                  type="button"
+                  onClick={() => openGoogleSearch(place.name, cityName)}
+                  className="cursor-pointer text-left"
+                >
+                  <p className="font-medium text-slate-900">{place.name}</p>
+                  <p className="text-xs text-slate-500">Day {activeDayData.day} • Stop {index + 1}</p>
+                  <p className="mt-1 inline-flex items-center gap-1 text-xs text-indigo-600">🔍 View on Google Maps</p>
+                </button>
+              </Popup>
+            </Marker>
           );
         })}
 
-        {revealedSegments.map((segment) => (
+        {visiblePlaces.length > 1 && (
           <Polyline
-            key={segment.id}
-            positions={segment.positions}
+            key={`active-day-${activeDayData.day}-visible-${visiblePlaces.length}`}
+            positions={visiblePlaces.map((place) => [place.lat, place.lon])}
             pathOptions={{
-              color: segment.color,
+              color: activeDayData.color,
               weight: 4,
               className: 'wandr-route-segment',
             }}
           />
-        ))}
+        )}
       </MapContainer>
 
       <div className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/90 p-2 text-xs shadow">
-        <p className="font-semibold text-slate-700">Day Routes</p>
-        <ul className="mt-1 space-y-1">
-          {groupedByDay.map((day) => (
-            <li key={`legend-${day.day}`} className="flex items-center gap-2 text-slate-700">
-              <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: day.color }} />
-              Day {day.day}
-            </li>
-          ))}
-        </ul>
+        <p className="font-semibold text-slate-700">Day {activeDayData.day} Route</p>
+        <p className="mt-1 text-slate-600">{visiblePlaces.length} / {activeDayData.places.length} stops revealed</p>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -7,7 +7,6 @@ import {
   dedupePlaces,
   enrichPlacesWithRatings,
   formatReviewLabel,
-  isApprovedFoodBrand,
 } from '../services/placeUtils';
 
 const CATEGORY_MATCHERS = {
@@ -26,10 +25,87 @@ const CATEGORY_MATCHERS = {
 };
 
 const FOOD_TAB = 'Food Spots';
+const FOOD_MIN_RATING = 4.2;
+const OTHER_MIN_RATING = 3.5;
+
+// WANDR FIX [2] — session-backed discover cache and selected state restoration.
+const DISCOVER_SESSION_KEYS = {
+  INPUT: 'wandr_trip_input',
+  SPOTS: 'wandr_discover_spots',
+  SELECTED: 'wandr_discover_selected',
+};
+
+const DISCOVER_IN_FLIGHT_REQUESTS = new Map();
+
+const readSessionJson = (key, fallbackValue) => {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) {
+      return fallbackValue;
+    }
+
+    const parsed = JSON.parse(raw);
+    return parsed ?? fallbackValue;
+  } catch (error) {
+    return fallbackValue;
+  }
+};
+
+const writeSessionJson = (key, value) => {
+  sessionStorage.setItem(key, JSON.stringify(value));
+};
+
+const createDiscoverCacheKey = (locationName = '', interests = []) => {
+  const normalizedLocation = String(locationName || '').trim().toLowerCase();
+  const normalizedInterests = [...(interests || [])].map((interest) => String(interest || '').trim().toLowerCase()).sort();
+  return `${normalizedLocation}::${normalizedInterests.join('|')}`;
+};
+
+const createDiscoverRequestKey = ({ locationName = '', lat = 0, lon = 0, interests = [] }) => {
+  const normalizedLocation = String(locationName || '').trim().toLowerCase();
+  const normalizedLat = Number(lat || 0).toFixed(6);
+  const normalizedLon = Number(lon || 0).toFixed(6);
+  const normalizedInterests = [...(interests || [])]
+    .map((interest) => String(interest || '').trim().toLowerCase())
+    .sort()
+    .join('|');
+  return `${normalizedLocation}::${normalizedLat}::${normalizedLon}::${normalizedInterests}`;
+};
+
+const fetchDiscoverPlaces = async ({ locationName, center, interests }) => {
+  const payload = {
+    locationName,
+    lat: center.lat,
+    lon: center.lon,
+    interests,
+  };
+
+  const requestKey = createDiscoverRequestKey(payload);
+  if (DISCOVER_IN_FLIGHT_REQUESTS.has(requestKey)) {
+    return DISCOVER_IN_FLIGHT_REQUESTS.get(requestKey);
+  }
+
+  const requestPromise = api
+    .post('/api/trip/discover', payload)
+    .finally(() => {
+      DISCOVER_IN_FLIGHT_REQUESTS.delete(requestKey);
+    });
+
+  DISCOVER_IN_FLIGHT_REQUESTS.set(requestKey, requestPromise);
+  return requestPromise;
+};
 
 const toRadians = (value) => (value * Math.PI) / 180;
 
 const normalizeCategory = (value = '') => value.toLowerCase();
+
+const passesRatingThreshold = (spot) => {
+  const rating = Number(spot?.rating || 0);
+  if (isFoodSpot(spot)) {
+    return rating > FOOD_MIN_RATING;
+  }
+  return rating > OTHER_MIN_RATING;
+};
 
 const mapAndPrepareSpots = async (rawSpots, source = 'discover') => {
   const mapped = (rawSpots || []).map((spot, index) => ({
@@ -39,7 +115,8 @@ const mapAndPrepareSpots = async (rawSpots, source = 'discover') => {
   }));
 
   const unique = dedupePlaces(mapped);
-  return enrichPlacesWithRatings(unique);
+  const rated = await enrichPlacesWithRatings(unique);
+  return rated.filter(passesRatingThreshold);
 };
 
 const haversineDistance = (a, b) => {
@@ -161,42 +238,42 @@ const groupSpotsByDay = (spots, days) => {
   }));
 };
 
-// WANDR CHANGE [6] — smart planner itinerary with max 5/day and food-per-day when available.
+// WANDR CHANGE [6] — smart planner itinerary with unique spots and max two food spots per day.
 const buildPlanForMeItinerary = (spots, days) => {
   const safeDays = Math.max(1, Number(days) || 1);
-  const maxSpots = safeDays * 5;
-  const rankedSpots = sortByRatingDesc(spots).slice(0, maxSpots);
-  const dayTargets = createBalancedDayCounts(rankedSpots.length, safeDays);
+  const requiredPerDay = 5;
+  const maxFoodPerDay = 2;
+  const rankedSpots = sortByRatingDesc(dedupePlaces(spots));
 
-  const foodPool = sortByRatingDesc(rankedSpots.filter(isFoodSpot));
-  const nonFoodPool = sortByRatingDesc(rankedSpots.filter((spot) => !isFoodSpot(spot)));
-  const isRuralOrLimitedFood = foodPool.length < safeDays;
-  const dayBuckets = Array.from({ length: safeDays }, () => []);
-
-  if (!isRuralOrLimitedFood) {
-    for (let dayIndex = 0; dayIndex < safeDays; dayIndex += 1) {
-      if (dayTargets[dayIndex] <= 0 || foodPool.length === 0) {
-        continue;
-      }
-      dayBuckets[dayIndex].push(foodPool.shift());
-    }
+  if (!rankedSpots.length) {
+    return Array.from({ length: safeDays }, (_, index) => ({
+      day: index + 1,
+      places: [],
+    }));
   }
 
+  const unassigned = [...rankedSpots];
+  const dayBuckets = Array.from({ length: safeDays }, () => []);
+
   for (let dayIndex = 0; dayIndex < safeDays; dayIndex += 1) {
-    while (dayBuckets[dayIndex].length < dayTargets[dayIndex]) {
-      const combinedPool = [...foodPool, ...nonFoodPool];
-      if (!combinedPool.length) {
+    while (dayBuckets[dayIndex].length < requiredPerDay && unassigned.length > 0) {
+      const currentFoodCount = dayBuckets[dayIndex].filter(isFoodSpot).length;
+      const candidates =
+        currentFoodCount >= maxFoodPerDay
+          ? unassigned.filter((spot) => !isFoodSpot(spot))
+          : unassigned;
+
+      if (!candidates.length) {
         break;
       }
 
       const nextSpot =
         dayBuckets[dayIndex].length === 0
-          ? combinedPool[0]
-          : findNearest(dayBuckets[dayIndex][dayBuckets[dayIndex].length - 1], combinedPool);
+          ? candidates[0]
+          : findNearest(dayBuckets[dayIndex][dayBuckets[dayIndex].length - 1], candidates);
 
       dayBuckets[dayIndex].push(nextSpot);
-      removeSpotFromPool(foodPool, nextSpot.id);
-      removeSpotFromPool(nonFoodPool, nextSpot.id);
+      removeSpotFromPool(unassigned, nextSpot.id);
     }
   }
 
@@ -210,7 +287,7 @@ const spotMatchesPreference = (spot, preference) => {
   const category = normalizeCategory(spot.category);
 
   if (preference === FOOD_TAB) {
-    return isFoodSpot(spot) && isApprovedFoodBrand(spot.name);
+    return isFoodSpot(spot) && Number(spot.rating || 0) > FOOD_MIN_RATING;
   }
 
   if (preference === 'Top Rated') {
@@ -229,14 +306,86 @@ export default function DiscoverPage() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('All');
   const [spots, setSpots] = useState([]);
-  const [brandedFoodSpots, setBrandedFoodSpots] = useState([]);
-  const [foodLoading, setFoodLoading] = useState(false);
+  const [foodSpots, setFoodSpots] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
 
+  // WANDR FIX [2] — read destination/preferences from sessionStorage fallback for back-navigation reloads.
+  const discoverRequestInput = useMemo(() => {
+    const sessionInput = readSessionJson(DISCOVER_SESSION_KEYS.INPUT, {});
+    return {
+      locationName: tripInput.locationName || sessionInput.locationName || '',
+      center: tripInput.center || sessionInput.center || null,
+      interests:
+        (Array.isArray(tripInput.interests) && tripInput.interests.length > 0
+          ? tripInput.interests
+          : Array.isArray(sessionInput.interests)
+            ? sessionInput.interests
+            : []),
+    };
+  }, [tripInput.locationName, tripInput.center, tripInput.interests]);
+
+  const discoverCacheKey = useMemo(
+    () => createDiscoverCacheKey(discoverRequestInput.locationName, discoverRequestInput.interests),
+    [discoverRequestInput.locationName, discoverRequestInput.interests]
+  );
+
+  const interestsSignature = useMemo(
+    () => (discoverRequestInput.interests || []).join('|'),
+    [discoverRequestInput.interests]
+  );
+
+  // WANDR FIX [2] — restore selected spots from sessionStorage without resetting user choices.
+  const restoreSelectionFromSession = useCallback(
+    (availableSpots, fallbackSelectedIds = []) => {
+      if (!discoverCacheKey) {
+        setSelectedIds(new Set(fallbackSelectedIds));
+        return;
+      }
+
+      const selectedStore = readSessionJson(DISCOVER_SESSION_KEYS.SELECTED, {});
+      const storedIds = Array.isArray(selectedStore[discoverCacheKey])
+        ? selectedStore[discoverCacheKey]
+        : fallbackSelectedIds;
+
+      const availableIds = new Set((availableSpots || []).map((spot) => spot.id));
+      setSelectedIds(new Set(storedIds.filter((spotId) => availableIds.has(spotId))));
+    },
+    [discoverCacheKey]
+  );
+
   const filterTabs = useMemo(() => {
-    const selectedInterests = (tripInput.interests || []).filter(Boolean);
+    const selectedInterests = (discoverRequestInput.interests || []).filter(Boolean);
     return ['All', ...new Set(selectedInterests)];
-  }, [tripInput.interests]);
+  }, [discoverRequestInput.interests]);
+
+  // WANDR FIX [2] — hydrate discover spots immediately from session cache to avoid empty flash during reload.
+  useEffect(() => {
+    if (!discoverCacheKey) {
+      return;
+    }
+
+    const spotsStore = readSessionJson(DISCOVER_SESSION_KEYS.SPOTS, {});
+    const cachedSpots = Array.isArray(spotsStore[discoverCacheKey]) ? spotsStore[discoverCacheKey] : [];
+
+    if (!cachedSpots.length) {
+      return;
+    }
+
+    setSpots(cachedSpots);
+    setFoodSpots(dedupePlaces(cachedSpots.filter((spot) => isFoodSpot(spot) && Number(spot.rating || 0) > FOOD_MIN_RATING)));
+    restoreSelectionFromSession(cachedSpots);
+  }, [discoverCacheKey, restoreSelectionFromSession]);
+
+  // WANDR FIX [2] — persist selected spot ids per destination/preferences for restore on back-navigation.
+  useEffect(() => {
+    if (!discoverCacheKey) {
+      return;
+    }
+
+    const selectedStore = readSessionJson(DISCOVER_SESSION_KEYS.SELECTED, {});
+    selectedStore[discoverCacheKey] = Array.from(selectedIds);
+    writeSessionJson(DISCOVER_SESSION_KEYS.SELECTED, selectedStore);
+  }, [discoverCacheKey, selectedIds]);
 
   useEffect(() => {
     const preset = location.state?.preset;
@@ -268,10 +417,14 @@ export default function DiscoverPage() {
       }
 
       setSpots(ratedPresetSpots);
-      setBrandedFoodSpots(
-        dedupePlaces(ratedPresetSpots.filter((spot) => isFoodSpot(spot) && isApprovedFoodBrand(spot.name)))
-      );
-      setSelectedIds(new Set(ratedPresetSpots.map((spot) => spot.id)));
+      setFoodSpots(dedupePlaces(ratedPresetSpots.filter((spot) => isFoodSpot(spot) && Number(spot.rating || 0) > FOOD_MIN_RATING)));
+      restoreSelectionFromSession(ratedPresetSpots, ratedPresetSpots.map((spot) => spot.id));
+
+      if (discoverCacheKey) {
+        const spotsStore = readSessionJson(DISCOVER_SESSION_KEYS.SPOTS, {});
+        spotsStore[discoverCacheKey] = ratedPresetSpots;
+        writeSessionJson(DISCOVER_SESSION_KEYS.SPOTS, spotsStore);
+      }
     };
 
     loadPresetSpots();
@@ -279,25 +432,25 @@ export default function DiscoverPage() {
     return () => {
       cancelled = true;
     };
-  }, [location.state, setTripInput]);
+  }, [discoverCacheKey, location.state, restoreSelectionFromSession, setTripInput]);
 
   useEffect(() => {
-    if (!tripInput.locationName || !tripInput.center || spots.length > 0) {
+    if (!discoverRequestInput.locationName || !discoverRequestInput.center) {
       return;
     }
 
     let cancelled = false;
 
+    // WANDR FIX [2] — re-fetch spots on route key changes (including browser back/forward navigation).
     const fetchSpots = async () => {
       setLoading(true);
       setError('');
 
       try {
-        const response = await api.post('/api/trip/discover', {
-          locationName: tripInput.locationName,
-          lat: tripInput.center.lat,
-          lon: tripInput.center.lon,
-          interests: tripInput.interests,
+        const response = await fetchDiscoverPlaces({
+          locationName: discoverRequestInput.locationName,
+          center: discoverRequestInput.center,
+          interests: discoverRequestInput.interests,
         });
 
         const discovered = await mapAndPrepareSpots(response.data?.places || [], 'discover');
@@ -307,9 +460,15 @@ export default function DiscoverPage() {
         }
 
         setSpots(discovered);
-        setBrandedFoodSpots(
-          dedupePlaces(discovered.filter((spot) => isFoodSpot(spot) && isApprovedFoodBrand(spot.name)))
-        );
+        setFoodSpots(dedupePlaces(discovered.filter((spot) => isFoodSpot(spot) && Number(spot.rating || 0) > FOOD_MIN_RATING)));
+
+        if (discoverCacheKey) {
+          const spotsStore = readSessionJson(DISCOVER_SESSION_KEYS.SPOTS, {});
+          spotsStore[discoverCacheKey] = discovered;
+          writeSessionJson(DISCOVER_SESSION_KEYS.SPOTS, spotsStore);
+        }
+
+        restoreSelectionFromSession(discovered);
       } catch (requestError) {
         setError(requestError?.response?.data?.message || 'Unable to discover spots right now.');
       } finally {
@@ -324,56 +483,11 @@ export default function DiscoverPage() {
     return () => {
       cancelled = true;
     };
-  }, [tripInput.locationName, tripInput.center, tripInput.interests, spots.length]);
+  }, [discoverCacheKey, discoverRequestInput.locationName, discoverRequestInput.center, interestsSignature, restoreSelectionFromSession]);
 
   useEffect(() => {
-    if (activeTab !== FOOD_TAB || !tripInput.locationName || !tripInput.center) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const fetchBrandedFoodSpots = async () => {
-      setFoodLoading(true);
-      setError('');
-
-      try {
-        const response = await api.post('/api/trip/discover', {
-          locationName: tripInput.locationName,
-          lat: tripInput.center.lat,
-          lon: tripInput.center.lon,
-          interests: [FOOD_TAB],
-          foodBrandsOnly: true,
-        });
-
-        const branded = (await mapAndPrepareSpots(response.data?.places || [], 'food-tab')).filter(
-          (spot) => isFoodSpot(spot) && isApprovedFoodBrand(spot.name)
-        );
-
-        if (cancelled) {
-          return;
-        }
-
-        const uniqueBranded = dedupePlaces(branded);
-        setBrandedFoodSpots(uniqueBranded);
-        setSpots((previous) => dedupePlaces([...previous, ...uniqueBranded]));
-      } catch (requestError) {
-        if (!cancelled) {
-          setError(requestError?.response?.data?.message || 'Unable to discover branded food spots right now.');
-        }
-      } finally {
-        if (!cancelled) {
-          setFoodLoading(false);
-        }
-      }
-    };
-
-    fetchBrandedFoodSpots();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTab, tripInput.locationName, tripInput.center]);
+    setFoodSpots(dedupePlaces(spots.filter((spot) => isFoodSpot(spot) && Number(spot.rating || 0) > FOOD_MIN_RATING)));
+  }, [spots]);
 
   useEffect(() => {
     if (!filterTabs.includes(activeTab)) {
@@ -387,13 +501,15 @@ export default function DiscoverPage() {
     }
 
     if (activeTab === FOOD_TAB) {
-      return dedupePlaces(brandedFoodSpots);
+      return dedupePlaces(foodSpots);
     }
 
     return dedupePlaces(spots.filter((spot) => spotMatchesPreference(spot, activeTab)));
-  }, [activeTab, spots, brandedFoodSpots]);
+  }, [activeTab, spots, foodSpots]);
 
-  const allSelectableSpots = useMemo(() => dedupePlaces([...spots, ...brandedFoodSpots]), [spots, brandedFoodSpots]);
+  const showLoadingSkeleton = loading && filteredSpots.length === 0;
+
+  const allSelectableSpots = useMemo(() => dedupePlaces([...spots, ...foodSpots]), [spots, foodSpots]);
 
   const visibleSections = useMemo(() => filterTabs.filter((tab) => tab !== 'All'), [filterTabs]);
 
@@ -438,20 +554,17 @@ export default function DiscoverPage() {
   // WANDR CHANGE [6] — smart auto-selection and planning from visible sections.
   const handlePlanForMe = () => {
     const autoSelected = dedupePlaces(
-      visibleSections.flatMap((section) =>
-        sortByRatingDesc(
-          allSelectableSpots.filter((spot) => spotMatchesPreference(spot, section) && Number(spot.rating || 0) > 4.0)
-        ).slice(0, 5)
-      )
+      visibleSections.flatMap((section) => allSelectableSpots.filter((spot) => spotMatchesPreference(spot, section)))
     );
 
     if (!autoSelected.length) {
-      setError('No spots with rating above 4.0 are available for smart planning right now.');
+      setError('No spots matching your selected preferences are available right now.');
       return;
     }
 
-    setSelectedIds(new Set(autoSelected.map((spot) => spot.id)));
     const itinerary = buildPlanForMeItinerary(autoSelected, Number(tripInput.days || 1));
+    const plannedIds = itinerary.flatMap((day) => day.places || []).map((spot) => spot.id);
+    setSelectedIds(new Set(plannedIds));
 
     planTrip({
       app: 'Wandr',
@@ -460,7 +573,7 @@ export default function DiscoverPage() {
       interests: tripInput.interests,
       days: Number(tripInput.days || 1),
       itinerary,
-      totalPlaces: autoSelected.length,
+      totalPlaces: itinerary.reduce((sum, day) => sum + (day.places || []).length, 0),
     });
 
     navigate('/itinerary');
@@ -485,9 +598,22 @@ export default function DiscoverPage() {
         ))}
       </div>
 
-      {(loading || foodLoading) && (
+      {/* WANDR FIX [2] — show loading skeleton during back-navigation reload with no empty state flash. */}
+      {showLoadingSkeleton && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={`discover-skeleton-${index}`} className="animate-pulse rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="h-5 w-2/3 rounded bg-slate-200" />
+              <div className="mt-3 h-3 w-1/3 rounded bg-slate-200" />
+              <div className="mt-4 h-6 w-24 rounded-full bg-amber-100" />
+              <div className="mt-2 h-3 w-1/2 rounded bg-slate-200" />
+            </div>
+          ))}
+        </div>
+      )}
+      {!showLoadingSkeleton && loading && (
         <LoadingSpinner
-          label={activeTab === FOOD_TAB ? 'Finding branded food spots for you...' : 'Finding top rated places for you...'}
+          label={activeTab === FOOD_TAB ? 'Finding top rated food spots for you...' : 'Finding top rated places for you...'}
         />
       )}
       {error && <p className="text-red-600">{error}</p>}

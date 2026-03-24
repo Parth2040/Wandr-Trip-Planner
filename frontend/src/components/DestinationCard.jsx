@@ -4,7 +4,6 @@ import { ArrowRight } from 'lucide-react';
 export default function DestinationCard({
   name,
   country,
-  days,
   tripsDone,
   image,
   index = 0,
@@ -28,9 +27,6 @@ export default function DestinationCard({
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
 
           <div className="absolute right-3 top-3 flex gap-2">
-            <span className="rounded-full bg-white/90 px-3 py-1 text-[11px] font-bold text-slate-800 shadow">
-              {days} Days Planned
-            </span>
             <span className="rounded-full bg-indigo-600/90 px-3 py-1 text-[11px] font-bold text-white shadow">
               {tripsDone} Trips Done
             </span>
@@ -45,7 +41,7 @@ export default function DestinationCard({
         <div className="p-3">
           <button
             onClick={onExplore}
-            className="wandr-btn w-full items-center justify-center rounded-full bg-zinc-700 text-sm font-semibold text-white hover:bg-zinc-600"
+            className="wandr-btn w-full items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white hover:bg-slate-700"
           >
             <span className="inline-flex items-center gap-2">
               Explore Now <ArrowRight size={16} />

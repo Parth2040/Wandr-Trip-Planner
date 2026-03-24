@@ -262,12 +262,28 @@ const fetchOverpassPlaces = async ({ lat, lon, interests, foodBrandsOnly = false
 
   const overpassQuery = `[out:json][timeout:35];\n(\n${queryParts}\n);\nout body;`;
 
-  const response = await axios.post('https://overpass-api.de/api/interpreter', overpassQuery, {
-    headers: {
-      'Content-Type': 'text/plain',
-    },
-    timeout: 40000,
-  });
+  const MAX_RETRIES = 2;
+  let response;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      response = await axios.post('https://overpass-api.de/api/interpreter', overpassQuery, {
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        timeout: 40000,
+      });
+      break;
+    } catch (error) {
+      const status = error?.response?.status;
+      if ((status === 429 || status >= 500) && attempt < MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+      // Return empty on final failure instead of crashing the whole discover request.
+      return [];
+    }
+  }
 
   const uniquePlaces = new Map();
 

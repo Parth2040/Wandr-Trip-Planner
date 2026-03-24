@@ -55,7 +55,9 @@ const mapOpenTripRateToFiveScale = (rate) => {
   return Number((3.5 + (clamped / 3) * 1.4).toFixed(1));
 };
 
-const fetchOpenTripMapRating = async (place) => {
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fetchOpenTripMapRating = async (place, retries = 2) => {
   const apiKey = process.env.REACT_APP_OPENTRIPMAP_API_KEY;
   const lat = Number(place?.lat);
   const lon = Number(place?.lon);
@@ -64,47 +66,72 @@ const fetchOpenTripMapRating = async (place) => {
     return null;
   }
 
-  try {
-    const response = await axios.get('https://api.opentripmap.com/0.1/en/places/radius', {
-      params: {
-        radius: 1200,
-        lon,
-        lat,
-        name: place.name,
-        limit: 8,
-        format: 'json',
-        apikey: apiKey,
-      },
-      timeout: 12000,
-    });
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.get('https://api.opentripmap.com/0.1/en/places/radius', {
+        params: {
+          radius: 1200,
+          lon,
+          lat,
+          name: place.name,
+          limit: 8,
+          format: 'json',
+          apikey: apiKey,
+        },
+        timeout: 12000,
+      });
 
-    const results = Array.isArray(response.data) ? response.data : [];
-    if (!results.length) {
+      const results = Array.isArray(response.data) ? response.data : [];
+      if (!results.length) {
+        return null;
+      }
+
+      const normalizedPlaceName = normalizeText(place.name);
+      const matched =
+        results.find((item) => normalizeText(item.name) === normalizedPlaceName) ||
+        results.find((item) => normalizeText(item.name).includes(normalizedPlaceName)) ||
+        results[0];
+
+      if (!matched) {
+        return null;
+      }
+
+      const rating = mapOpenTripRateToFiveScale(matched.rate);
+      if (!rating) {
+        return null;
+      }
+
+      return {
+        rating,
+        userRatingsTotal: Number(place.userRatingsTotal) || null,
+      };
+    } catch (error) {
+      const status = error?.response?.status;
+      if ((status === 429 || status >= 500) && attempt < retries) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
       return null;
     }
-
-    const normalizedPlaceName = normalizeText(place.name);
-    const matched =
-      results.find((item) => normalizeText(item.name) === normalizedPlaceName) ||
-      results.find((item) => normalizeText(item.name).includes(normalizedPlaceName)) ||
-      results[0];
-
-    if (!matched) {
-      return null;
-    }
-
-    const rating = mapOpenTripRateToFiveScale(matched.rate);
-    if (!rating) {
-      return null;
-    }
-
-    return {
-      rating,
-      userRatingsTotal: Number(place.userRatingsTotal) || null,
-    };
-  } catch (error) {
-    return null;
   }
+
+  return null;
+};
+
+// Concurrency-limited Promise.all — runs at most `limit` tasks in parallel.
+const promisePool = async (tasks, limit = 3) => {
+  const results = new Array(tasks.length);
+  let nextIndex = 0;
+
+  const runNext = async () => {
+    while (nextIndex < tasks.length) {
+      const index = nextIndex++;
+      results[index] = await tasks[index]();
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => runNext()));
+  return results;
 };
 
 export const isApprovedFoodBrand = (name = '') => {
@@ -152,34 +179,32 @@ export const dedupePlaces = (places = []) => {
 export const enrichPlacesWithRatings = async (places = []) => {
   const safePlaces = Array.isArray(places) ? places : [];
 
-  const rated = await Promise.all(
-    safePlaces.map(async (place) => {
-      const key = buildPlaceIdentityKey(place);
-      if (ratingCache.has(key)) {
-        return {
-          ...place,
-          ...ratingCache.get(key),
-        };
-      }
-
-      const openTripMapMeta = await fetchOpenTripMapRating(place);
-      const rating = openTripMapMeta?.rating || getDeterministicRating(place.name);
-      const userRatingsTotal = Number(place.userRatingsTotal || openTripMapMeta?.userRatingsTotal || 0) || null;
-      const payload = {
-        rating,
-        userRatingsTotal,
-      };
-
-      ratingCache.set(key, payload);
-
+  const tasks = safePlaces.map((place) => async () => {
+    const key = buildPlaceIdentityKey(place);
+    if (ratingCache.has(key)) {
       return {
         ...place,
-        ...payload,
+        ...ratingCache.get(key),
       };
-    })
-  );
+    }
 
-  return rated;
+    const openTripMapMeta = await fetchOpenTripMapRating(place);
+    const rating = openTripMapMeta?.rating || getDeterministicRating(place.name);
+    const userRatingsTotal = Number(place.userRatingsTotal || openTripMapMeta?.userRatingsTotal || 0) || null;
+    const payload = {
+      rating,
+      userRatingsTotal,
+    };
+
+    ratingCache.set(key, payload);
+
+    return {
+      ...place,
+      ...payload,
+    };
+  });
+
+  return promisePool(tasks, 3);
 };
 
 export const enrichItineraryWithRatings = async (itinerary = []) => {

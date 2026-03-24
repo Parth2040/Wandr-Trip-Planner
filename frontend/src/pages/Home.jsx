@@ -12,14 +12,6 @@ const features = [
   { icon: '📍', title: 'Discover Hidden Gems', desc: 'Go beyond tourist spots with curated local experiences unique to every destination.' },
 ];
 
-const POPULAR_DESTINATION_DEFAULT_PREFERENCES = [
-  'Nature',
-  'Adventure Sports',
-  'Historical Places',
-  'Food Spots',
-  'Popular Spots',
-];
-
 const popularDestinations = [
   {
     name: 'New York',
@@ -158,7 +150,7 @@ export default function Home() {
       ...previous,
       locationName: destination.name,
       center: destination.center,
-      interests: POPULAR_DESTINATION_DEFAULT_PREFERENCES,
+      interests: [],
       days: destination.days,
     }));
     recordSearch({
@@ -166,11 +158,7 @@ export default function Home() {
       center: destination.center,
     });
 
-    navigate('/discover', {
-      state: {
-        preset: destination,
-      },
-    });
+    navigate('/interests');
   };
 
   return (
