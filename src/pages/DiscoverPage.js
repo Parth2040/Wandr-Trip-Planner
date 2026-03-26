@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import api from '../services/api';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useTrip } from '../context/TripContext';
 import {
@@ -27,6 +26,21 @@ const CATEGORY_MATCHERS = {
 const FOOD_TAB = 'Food Spots';
 const FOOD_MIN_RATING = 4.2;
 const OTHER_MIN_RATING = 3.5;
+
+const DISCOVER_SEARCH_TERMS = {
+  'Historical Places': ['historical landmark', 'museum'],
+  Nature: ['park', 'viewpoint'],
+  'Religious Places': ['temple', 'church'],
+  'Food Spots': ['restaurant', 'cafe'],
+  'Popular Spots': ['tourist attraction', 'landmark'],
+  'Top Rated': ['must visit', 'top attraction'],
+  'Hidden Gems': ['local attraction', 'gallery'],
+  'Adventure Sports': ['outdoor activity', 'sports center'],
+  Parks: ['park', 'garden'],
+  Beaches: ['beach'],
+  Bars: ['bar', 'pub'],
+  Casinos: ['casino'],
+};
 
 // WANDR FIX [2] — session-backed discover cache and selected state restoration.
 const DISCOVER_SESSION_KEYS = {
@@ -72,24 +86,119 @@ const createDiscoverRequestKey = ({ locationName = '', lat = 0, lon = 0, interes
   return `${normalizedLocation}::${normalizedLat}::${normalizedLon}::${normalizedInterests}`;
 };
 
+const resolveLocationCenter = async (locationName) => {
+  const params = new URLSearchParams({
+    q: locationName,
+    format: 'jsonv2',
+    limit: '1',
+  });
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error('Unable to discover spots right now.');
+  }
+
+  const data = await response.json();
+  const first = Array.isArray(data) ? data[0] : null;
+
+  if (!first?.lat || !first?.lon) {
+    throw new Error('Location not found. Please try a different destination.');
+  }
+
+  return {
+    lat: Number(first.lat),
+    lon: Number(first.lon),
+  };
+};
+
+const searchPlacesForInterest = async ({ locationName, interest }) => {
+  const terms = (DISCOVER_SEARCH_TERMS[interest] || [interest]).slice(0, 2);
+
+  const requests = terms.map(async (term) => {
+    const params = new URLSearchParams({
+      q: `${term} in ${locationName}`,
+      format: 'jsonv2',
+      limit: '10',
+      addressdetails: '0',
+    });
+
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`);
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json();
+    return (Array.isArray(data) ? data : []).map((item) => ({
+      id: `discover-${item.place_id}`,
+      placeId: `discover-${item.place_id}`,
+      name: String(item.display_name || '').split(',')[0] || 'Point of Interest',
+      category: interest,
+      lat: Number(item.lat),
+      lon: Number(item.lon),
+      source: 'discover-local',
+    }));
+  });
+
+  const settled = await Promise.allSettled(requests);
+  return settled
+    .filter((result) => result.status === 'fulfilled')
+    .flatMap((result) => result.value)
+    .filter((place) => Number.isFinite(place.lat) && Number.isFinite(place.lon));
+};
+
 const fetchDiscoverPlaces = async ({ locationName, center, interests }) => {
   const payload = {
     locationName,
-    lat: center.lat,
-    lon: center.lon,
     interests,
   };
+
+  if (center && Number.isFinite(Number(center.lat)) && Number.isFinite(Number(center.lon))) {
+    payload.lat = Number(center.lat);
+    payload.lon = Number(center.lon);
+  }
 
   const requestKey = createDiscoverRequestKey(payload);
   if (DISCOVER_IN_FLIGHT_REQUESTS.has(requestKey)) {
     return DISCOVER_IN_FLIGHT_REQUESTS.get(requestKey);
   }
 
-  const requestPromise = api
-    .post('/api/trip/discover', payload)
-    .finally(() => {
-      DISCOVER_IN_FLIGHT_REQUESTS.delete(requestKey);
-    });
+  const requestPromise = (async () => {
+    const resolvedCenter =
+      center && Number.isFinite(Number(center.lat)) && Number.isFinite(Number(center.lon))
+        ? {
+            lat: Number(center.lat),
+            lon: Number(center.lon),
+          }
+        : await resolveLocationCenter(locationName);
+
+    const selectedInterests = Array.isArray(interests) && interests.length ? interests : ['Popular Spots'];
+    const interestRequests = selectedInterests.slice(0, 6).map((interest) =>
+      searchPlacesForInterest({
+        locationName,
+        interest,
+      })
+    );
+
+    const settled = await Promise.allSettled(interestRequests);
+    const places = dedupePlaces(
+      settled
+        .filter((result) => result.status === 'fulfilled')
+        .flatMap((result) => result.value)
+    );
+
+    return {
+      data: {
+        app: 'Wandr',
+        locationName,
+        center: resolvedCenter,
+        interests: selectedInterests,
+        places,
+        totalPlaces: places.length,
+      },
+    };
+  })().finally(() => {
+    DISCOVER_IN_FLIGHT_REQUESTS.delete(requestKey);
+  });
 
   DISCOVER_IN_FLIGHT_REQUESTS.set(requestKey, requestPromise);
   return requestPromise;
@@ -435,7 +544,7 @@ export default function DiscoverPage() {
   }, [discoverCacheKey, location.state, restoreSelectionFromSession, setTripInput]);
 
   useEffect(() => {
-    if (!discoverRequestInput.locationName || !discoverRequestInput.center) {
+    if (!discoverRequestInput.locationName) {
       return;
     }
 
@@ -452,6 +561,17 @@ export default function DiscoverPage() {
           center: discoverRequestInput.center,
           interests: discoverRequestInput.interests,
         });
+
+        const responseCenter = response?.data?.center;
+        if (!discoverRequestInput.center && responseCenter?.lat && responseCenter?.lon) {
+          setTripInput((previous) => ({
+            ...previous,
+            center: {
+              lat: Number(responseCenter.lat),
+              lon: Number(responseCenter.lon),
+            },
+          }));
+        }
 
         const discovered = await mapAndPrepareSpots(response.data?.places || [], 'discover');
 
@@ -557,12 +677,14 @@ export default function DiscoverPage() {
       visibleSections.flatMap((section) => allSelectableSpots.filter((spot) => spotMatchesPreference(spot, section)))
     );
 
-    if (!autoSelected.length) {
+    const effectiveSelection = autoSelected.length ? autoSelected : dedupePlaces(allSelectableSpots);
+
+    if (!effectiveSelection.length) {
       setError('No spots matching your selected preferences are available right now.');
       return;
     }
 
-    const itinerary = buildPlanForMeItinerary(autoSelected, Number(tripInput.days || 1));
+    const itinerary = buildPlanForMeItinerary(effectiveSelection, Number(tripInput.days || 1));
     const plannedIds = itinerary.flatMap((day) => day.places || []).map((spot) => spot.id);
     setSelectedIds(new Set(plannedIds));
 
