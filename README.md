@@ -8,7 +8,7 @@ Wandr is a React-based trip planning app that helps users search destinations, p
 
 **Your world. Your journey. Planned instantly.**
 
-Pick a city, choose what you love, and Wandr builds a day-by-day itinerary with every stop plotted on an interactive map.
+Wandr is a trip planner web app. Search any city, pick your interests and trip length (1–10 days), and it finds real places from OpenStreetMap, rates them, and builds a day-by-day itinerary with stops ordered by distance on a Leaflet route map. Save trips to My Trips. Built with React, Tailwind and Leaflet, hosted on Vercel.
 
 [**🌐 Live Demo**](https://wandr-trip-planner.vercel.app/) · 
 
@@ -22,15 +22,7 @@ Pick a city, choose what you love, and Wandr builds a day-by-day itinerary with 
 
 </div>
 
----
 
-## 🎬 Demo Video
-
-https://github.com/user-attachments/assets/REPLACE-WITH-YOUR-VIDEO-ID
-
-> To embed the video, open this README in the GitHub web editor and drag the `.mp4` file into it. GitHub uploads the file and inserts the link for you.
-
----
 
 ## 📖 About
 
