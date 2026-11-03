@@ -8,6 +8,7 @@ Wandr is a React-based trip planning app that helps users search destinations, p
 
 Wandr Demo Video
 
+https://github.com/user-attachments/assets/4af512e3-2497-41cd-b723-5ec007a7a599
 
 [**🌐 Live Demo**](https://wandr-trip-planner.vercel.app/) · 
 
